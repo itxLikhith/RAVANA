@@ -1,0 +1,17 @@
+# RAVANA Experiments Requirements
+
+# Core dependencies (required)
+numpy>=1.24.0
+
+# Optional dependencies for enhanced functionality
+pandas>=1.5.0  # For CSV logging and data analysis
+matplotlib>=3.5.0  # For plotting metric trajectories
+
+# Optional: Production perception features
+torch>=2.0.0  # For ResNet50 feature extraction
+torchvision>=0.15.0  # For image processing
+transformers>=4.30.0  # For Wav2Vec2 audio processing
+librosa>=0.10.0  # For audio preprocessing
+
+# Optional: Constraint solving
+z3-solver>=4.12.0  # For symbolic constraint checking

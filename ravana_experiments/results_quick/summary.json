@@ -1,0 +1,40 @@
+{
+  "timestamp": "2026-03-19T10:30:14.950429",
+  "n_episodes": 100,
+  "configurations": [
+    "RAVANA-0",
+    "RAVANA-Pro",
+    "RAVANA-Ablated"
+  ],
+  "baselines": [
+    "naive_rl",
+    "llm_stub",
+    "rule_based"
+  ],
+  "metrics_summary": {
+    "RAVANA-0": {
+      "dissonance_reduction": 0.8580410973721119,
+      "identity_strength": 0.7983500000000001,
+      "generalization_accuracy": 0.125,
+      "transfer_efficiency": 0.0,
+      "demographic_parity_gap": 5.2884615384615365,
+      "wisdom_score": 0.46
+    },
+    "RAVANA-Pro": {
+      "dissonance_reduction": 0.8396371420673461,
+      "identity_strength": 0.7508500000000001,
+      "generalization_accuracy": 0.5,
+      "transfer_efficiency": 0.0,
+      "demographic_parity_gap": 4.926108374384236,
+      "wisdom_score": 0.475
+    },
+    "RAVANA-Ablated": {
+      "dissonance_reduction": 0.965112270230636,
+      "identity_strength": 0.7241500000000002,
+      "generalization_accuracy": 0.3333333333333333,
+      "transfer_efficiency": 0.0,
+      "demographic_parity_gap": 12.525010004001603,
+      "wisdom_score": 0.4675
+    }
+  }
+}

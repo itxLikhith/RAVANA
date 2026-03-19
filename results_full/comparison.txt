@@ -1,0 +1,56 @@
+======================================================================
+RAVANA vs BASELINES COMPARISON
+======================================================================
+
+RAVANA Performance:
+----------------------------------------
+  ✗ dissonance_reduction: 0.320 (target: 0.200)
+  ✓ identity_strength: 1.000 (target: 0.850)
+  ✗ generalization_accuracy: 0.015 (target: 0.900)
+  ✗ transfer_efficiency: 0.500 (target: 0.800)
+  ✓ demographic_parity_gap: 0.161 (target: 5.000)
+  ✗ wisdom_score: 0.443 (target: 0.750)
+
+Baseline Comparison:
+----------------------------------------
+
+NAIVE_RL:
+  Accuracy: 0.492
+  Fairness: 0.500
+  Generalization: 0.000
+
+LLM_STUB:
+  Accuracy: 0.688
+  Fairness: 0.991
+  Generalization: 0.550
+
+RULE_BASED:
+  Accuracy: 0.501
+  Fairness: 0.956
+  Generalization: 0.251
+
+======================================================================
+Key Advantages of RAVANA:
+======================================================================
+1. Cognitive Architecture:
+   - Structured reasoning (System 1/2) vs pattern matching
+   - Belief tracking and updating vs fixed Q-values
+   - Dissonance-driven learning vs pure reward maximization
+
+2. Emotional Intelligence:
+   - VAD emotional dynamics guide decision-making
+   - Empathy toward student needs
+   - Reappraisal for ethical consistency
+
+3. Pressure Mechanisms:
+   - Falsification drives epistemic humility
+   - Dissonance forces belief revision
+   - Dream sabotage prevents overfitting
+   - Meaning scoring guides long-term growth
+
+4. Fairness and Ethics:
+   - Explicit demographic parity tracking
+   - Hard constraint satisfaction
+   - Value alignment with student preferences
+
+======================================================================
