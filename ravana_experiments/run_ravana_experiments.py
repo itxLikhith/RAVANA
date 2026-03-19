@@ -110,36 +110,36 @@ class RAVANAEnvironmentWrapper:
 
 
 def create_ravana_0_config(seed: int = 42) -> Dict[str, Any]:
-    """RAVANA-0: All defaults, baseline configuration."""
+    """RAVANA-0: CPU-friendly baseline configuration."""
     return {
         "name": "RAVANA-0",
         "seed": seed,
-        # Perception: all mock (defaults)
+        # Perception: mock (fastest)
         "use_resnet": False,
         "use_wav2vec": False,
         "force_mock_perception": True,
-        # System 2: simple configuration
+        # System 2: minimal simulations for CPU
         "system2_mcts_depth": 3,
-        "system2_mcts_simulations": 20,
+        "system2_mcts_simulations": 15,
         # Critical thinking: mock solver
         "use_z3_solver": False,
     }
 
 
 def create_ravana_pro_config(seed: int = 42) -> Dict[str, Any]:
-    """RAVANA-Pro: Production configuration with extended features."""
+    """RAVANA-Pro: CPU-optimized production configuration."""
     return {
         "name": "RAVANA-Pro",
         "seed": seed,
-        # Perception: production extractors
+        # Perception: neural extractors on CPU
         "use_resnet": True,
         "use_wav2vec": True,
         "force_mock_perception": False,
         "perception_device": "cpu",
-        # System 2: deeper MCTS
-        "system2_mcts_depth": 8,
-        "system2_mcts_simulations": 100,
-        # Critical thinking: Z3 solver if available
+        # System 2: reduced simulations for CPU responsiveness
+        "system2_mcts_depth": 5,
+        "system2_mcts_simulations": 30,
+        # Critical thinking: Z3 solver
         "use_z3_solver": True,
     }
 
@@ -603,8 +603,8 @@ def generate_plots(
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(description="Run RAVANA classroom experiments")
-    parser.add_argument("--episodes", type=int, default=1000, help="Number of episodes")
-    parser.add_argument("--output", type=str, default="results", help="Output directory")
+    parser.add_argument("--episodes", type=int, default=5000, help="Number of episodes")
+    parser.add_argument("--output", type=str, default="results_cpu_optimized", help="Output directory")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--quick", action="store_true", help="Quick test run (100 episodes)")
     

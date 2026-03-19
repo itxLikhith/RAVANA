@@ -1,5 +1,5 @@
 """
-RavanaAgent — RAVANA Core Extended v0.2.0
+RavanaAgent — RAVANA Core Extended v0.3.0
 Top-level cognitive agent integrating all RAVANA modules with extension support.
 
 Section 2 of the RAVANA paper.
@@ -12,6 +12,13 @@ Pressures for emergence:
   P3: Structured Dream Sabotage (counterfactual rehearsal)
   P4: Meaning as Staked Coherence
 
+NEW in v0.3.0 (Adaptive Calibration & Interactive XAI):
+- Adaptive pressure scheduling: $\kappa$ and weights evolve over training
+- Epistemic stages: Early (humility) → Mid (balanced) → Late (identity)
+- Interactive explanation challenges with reappraisal loop
+- Transfer efficiency tracking from challenges vs rewards
+- Target: ~0.2 dissonance floor, ~0.85 identity strength plateau
+
 NEW in v0.2.0:
 - Configurable feature extractors (ResNet, Wav2Vec)
 - Configurable MCTS depth and rollouts
@@ -20,8 +27,9 @@ NEW in v0.2.0:
 """
 
 import numpy as np
-from typing import Dict, Any, Optional, List
-from dataclasses import dataclass
+from typing import Dict, Any, Optional, List, Tuple
+from dataclasses import dataclass, field
+from enum import Enum
 
 from .perception import PerceptionModule
 from .emotion import EmotionModule
@@ -54,18 +62,144 @@ class DreamResult:
     coherence_delta: float
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# NEW: Training Stage Enum for Adaptive Calibration
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TrainingStage(Enum):
+    """Training stages for adaptive pressure calibration."""
+    EARLY = "early"      # Episodes 0-200k: Epistemic humility (falsification priority)
+    MID = "mid"          # Episodes 200k-600k: Balanced exploration
+    LATE = "late"        # Episodes 600k-1M: Identity commitment (meaning priority)
+    PLATEAU = "plateau"  # Beyond 1M: Stable identity
+
+
+@dataclass
+class AdaptivePressureScheduler:
+    """
+    Adaptive pressure scheduler for epistemic calibration.
+    
+    Implements the evolving pressure schedule from the RAVANA paper:
+    - Early: Prioritize falsification (break brittle rules)
+    - Late: Prioritize meaning (stabilize values)
+    - Kappa increases over time (higher effort cost for established beliefs)
+    
+    Target metrics:
+    - Dissonance floor: ~0.2
+    - Identity strength plateau: ~0.85
+    """
+    # Stage boundaries
+    early_end: int = 200000
+    mid_end: int = 600000
+    late_end: int = 1000000
+    
+    # Base weight configurations per stage
+    early_weights: Dict[str, float] = field(default_factory=lambda: {
+        "w_dissonance": 0.6,   # High: Prioritize falsification / epistemic humility
+        "w_identity": 0.2,
+        "w_predictive": 0.2,
+    })
+    mid_weights: Dict[str, float] = field(default_factory=lambda: {
+        "w_dissonance": 0.4,   # Balanced
+        "w_identity": 0.3,
+        "w_predictive": 0.3,
+    })
+    late_weights: Dict[str, float] = field(default_factory=lambda: {
+        "w_dissonance": 0.25,
+        "w_identity": 0.55,    # High: Prioritize identity / meaning
+        "w_predictive": 0.20,
+    })
+    
+    # Kappa (effort cost) schedule
+    kappa_early: float = 0.05   # Low effort cost: encourage exploration
+    kappa_mid: float = 0.10
+    kappa_late: float = 0.20   # High effort cost: stabilize commitments
+    kappa_plateau: float = 0.25
+    
+    # Target metrics
+    target_dissonance_floor: float = 0.2
+    target_identity_plateau: float = 0.85
+    
+    def get_stage(self, episode: int) -> TrainingStage:
+        """Determine training stage from episode count."""
+        if episode < self.early_end:
+            return TrainingStage.EARLY
+        elif episode < self.mid_end:
+            return TrainingStage.MID
+        elif episode < self.late_end:
+            return TrainingStage.LATE
+        else:
+            return TrainingStage.PLATEAU
+    
+    def get_weights(self, episode: int) -> Dict[str, float]:
+        """Get adaptive weights for current training stage."""
+        stage = self.get_stage(episode)
+        
+        if stage == TrainingStage.EARLY:
+            return self.early_weights.copy()
+        elif stage == TrainingStage.MID:
+            # Interpolate between early and late
+            progress = (episode - self.early_end) / (self.mid_end - self.early_end)
+            return {
+                k: self.early_weights[k] + progress * (self.mid_weights[k] - self.early_weights[k])
+                for k in self.early_weights.keys()
+            }
+        elif stage == TrainingStage.LATE:
+            # Interpolate between mid and late
+            progress = (episode - self.mid_end) / (self.late_end - self.mid_end)
+            return {
+                k: self.mid_weights[k] + progress * (self.late_weights[k] - self.mid_weights[k])
+                for k in self.mid_weights.keys()
+            }
+        else:  # PLATEAU
+            return self.late_weights.copy()
+    
+    def get_kappa(self, episode: int) -> float:
+        """Get adaptive kappa (effort cost) for current training stage."""
+        stage = self.get_stage(episode)
+        
+        if stage == TrainingStage.EARLY:
+            return self.kappa_early
+        elif stage == TrainingStage.MID:
+            progress = (episode - self.early_end) / (self.mid_end - self.early_end)
+            return self.kappa_early + progress * (self.kappa_mid - self.kappa_early)
+        elif stage == TrainingStage.LATE:
+            progress = (episode - self.mid_end) / (self.late_end - self.mid_end)
+            return self.kappa_mid + progress * (self.kappa_late - self.kappa_mid)
+        else:  # PLATEAU
+            return self.kappa_plateau
+
+
+@dataclass
+class ChallengeRecord:
+    """
+    Record of an explanation challenge and the agent's response.
+    
+    Used to track transfer efficiency: learning from challenges vs rewards.
+    """
+    challenge_id: str
+    original_explanation: str
+    challenge_reason: str
+    initial_dissonance: float
+    final_dissonance: float
+    resolution_strategy: str
+    updated_decision: str
+    timestamp: int
+    learning_gain: float = 0.0  # Estimated learning from this challenge
+
+
 class RavanaAgent:
     """
-    EXTENDED Full RAVANA cognitive agent (v0.2.0).
+    EXTENDED Full RAVANA cognitive agent (v0.3.0).
 
     Modules:
-      — PerceptionModule:  multimodal input + configurable extractors (NEW)
+      — PerceptionModule:  multimodal input + configurable extractors
       — EmotionModule:     VAD dynamics + empathy + reappraisal
       — PsychologyModule:  ACT-R + CDE + Social norms
       — GlobalWorkspace:   attention bidding + broadcast
-      — DualProcessReasoner: System 1/2 with configurable MCTS (NEW)
+      — DualProcessReasoner: System 1/2 with configurable MCTS
       — BayesianBeliefTracker: belief state
-      — CriticalThinkingModule: falsification + constraint solving (NEW)
+      — CriticalThinkingModule: falsification + constraint solving + discovery
 
     Pressures:
       — Falsification: confidence decay on failed MBFL tests
@@ -73,10 +207,15 @@ class RavanaAgent:
       — Dream Sabotage: counterfactual rehearsal (20% reversal rate)
       — Meaning: staked coherence drives long-term learning
       
-    NEW Configuration (v0.2.0):
-      — Perception: use_resnet, use_wav2vec for production extractors
-      — Reasoning: system2_mcts_depth, system2_mcts_simulations, rollout_policy
-      — Critical Thinking: use_z3_solver, constraint_solver for symbolic reasoning
+    NEW in v0.3.0:
+      — AdaptivePressureScheduler: $\kappa$ and weights evolve over training
+      — Interactive XAI: Challenge-response loop for epistemic humility
+      — Transfer efficiency tracking
+      
+    Configuration:
+      — Perception: use_resnet, use_wav2vec
+      — Reasoning: system2_mcts_depth, system2_mcts_simulations
+      — Critical Thinking: use_z3_solver
     """
 
     def __init__(
@@ -86,12 +225,15 @@ class RavanaAgent:
         # Dream sabotage params
         dream_counterfactual_rate: float = 0.20,
         dream_failure_rate: float = 1.5,
-        # Meaning weights
+        # Meaning weights (will be overridden by scheduler)
         w_dissonance: float = 0.4,
         w_identity: float = 0.3,
         w_predictive: float = 0.3,
-        # Effort cost
+        # Effort cost (will be overridden by scheduler)
         kappa: float = 0.1,
+        # NEW: Adaptive calibration settings
+        use_adaptive_calibration: bool = True,
+        total_training_episodes: int = 1000000,
         # NEW: Perception configuration
         use_resnet: bool = False,
         use_wav2vec: bool = False,
@@ -118,6 +260,8 @@ class RavanaAgent:
             "w_identity": w_identity,
             "w_predictive": w_predictive,
             "kappa": kappa,
+            "use_adaptive_calibration": use_adaptive_calibration,
+            "total_training_episodes": total_training_episodes,
             "use_resnet": use_resnet,
             "use_wav2vec": use_wav2vec,
             "force_mock_perception": force_mock_perception,
@@ -127,6 +271,11 @@ class RavanaAgent:
             "use_z3_solver": use_z3_solver,
         }
 
+        # ── NEW: Adaptive Pressure Scheduler ─────────────────────────
+        self.use_adaptive_calibration = use_adaptive_calibration
+        self.pressure_scheduler = AdaptivePressureScheduler()
+        self.current_episode = 0
+        
         # ── Core Modules (Extended) ───────────────────────────────────
         self.perception = PerceptionModule(
             seed=seed,
@@ -169,10 +318,12 @@ class RavanaAgent:
         # ── Pressure Parameters ─────────────────────────────────────────
         self.dream_counterfactual_rate = dream_counterfactual_rate
         self.dream_failure_rate = dream_failure_rate
+        
+        # These will be updated by scheduler
         self.w_dissonance = w_dissonance
         self.w_identity = w_identity
         self.w_predictive = w_predictive
-        self.kappa = kappa  # effort cost multiplier
+        self.kappa = kappa
 
         # ── State ──────────────────────────────────────────────────────────
         self.cycle_count: int = 0
@@ -180,13 +331,27 @@ class RavanaAgent:
         self.meaning_history: List[float] = []
         self.coherence_score: float = 0.5
 
-        # ── Core Constraints (Section 8.4 — hardcoded benevolence) ───────
+        # ── Core Constraints ─────────────────────────────────────────────
         self.hard_constraints = [
             "minimize harm to others",
             "respect autonomy",
             "truth-seeking over deception",
         ]
+        # Add hard constraints to critical thinking module
+        for constraint in self.hard_constraints:
+            from .critical_thinking import Constraint
+            self.critical.add_constraint(Constraint(
+                name=f"hard_{constraint[:20]}",
+                expression=constraint,
+                source="hardcoded",
+                confidence=1.0,
+            ))
 
+        # ── NEW: Interactive XAI Tracking ─────────────────────────────
+        self.challenge_history: List[ChallengeRecord] = []
+        self.explanation_challenges_received: int = 0
+        self.explanation_challenges_successful: int = 0
+        
         # Initialize default beliefs
         for value in self.core_values:
             self.beliefs.add_belief(value, prior_mean=0.7, prior_variance=0.04)
@@ -197,6 +362,33 @@ class RavanaAgent:
             )
 
         self._setup_default_commitments()
+
+    def _update_adaptive_parameters(self):
+        """
+        Update pressure parameters based on current training episode.
+        Called automatically during the cognitive cycle.
+        """
+        if not self.use_adaptive_calibration:
+            return
+        
+        weights = self.pressure_scheduler.get_weights(self.current_episode)
+        self.w_dissonance = weights["w_dissonance"]
+        self.w_identity = weights["w_identity"]
+        self.w_predictive = weights["w_predictive"]
+        self.kappa = self.pressure_scheduler.get_kappa(self.current_episode)
+    
+    def set_training_episode(self, episode: int):
+        """
+        Set current training episode for adaptive calibration.
+        
+        This should be called by the training loop before each step.
+        """
+        self.current_episode = episode
+        self._update_adaptive_parameters()
+    
+    def get_training_stage(self) -> TrainingStage:
+        """Get current training stage."""
+        return self.pressure_scheduler.get_stage(self.current_episode)
 
     def _setup_default_commitments(self):
         for value in self.core_values:
@@ -230,6 +422,9 @@ class RavanaAgent:
         """
         self.cycle_count += 1
         context = context or {}
+        
+        # Update adaptive parameters
+        self._update_adaptive_parameters()
 
         # ── Step 1: Perception ──────────────────────────────────────────
         perc_out = self.perception.process(text=text, visual=visual, audio=audio)
@@ -254,6 +449,7 @@ class RavanaAgent:
             global_U=U,
         )
         emotion_state = self.emotion.current_state()
+        current_arousal = emotion_state["arousal"]
 
         # ── Step 4: Psychology (Dissonance + Social Norms) ───────────────
         psy_state = {
@@ -264,7 +460,11 @@ class RavanaAgent:
             "safety_signal": context.get("safety_signal", 0.5),
             "ethics_signal": context.get("ethics_signal", 0.5),
         }
-        psy_result = self.psychology.process(psy_state, global_U=U)
+        psy_result = self.psychology.process(
+            psy_state, 
+            global_U=U,
+            arousal=current_arousal,  # Pass the new parameter
+        )
         dissonance_score = self.psychology.dissonance_score
 
         # ── Step 5: Reasoning ───────────────────────────────────────────
@@ -283,7 +483,14 @@ class RavanaAgent:
         )
 
         # ── Step 6: Decision ────────────────────────────────────────────
-        decision = self._make_decision(reasoning_result, dissonance_score, psy_result)
+        # Extract scenario_id from context if available
+        scenario_id = context.get("task_id", "unknown_cycle")
+        decision = self._make_decision(
+            reasoning_result, 
+            dissonance_score, 
+            psy_result,
+            scenario_id=scenario_id
+        )
 
         # ── Step 7: Meaning Score ────────────────────────────────────────
         meaning_score = self._compute_meaning(
@@ -296,7 +503,7 @@ class RavanaAgent:
         # ── Step 8: Learning (falsification pressure) ──────────────────
         self._apply_falsification_pressure(reasoning_result, dissonance_score)
         
-        # ── Step 9: Dynamic Identity Update (NEW) ───────────────────
+        # ── Step 9: Dynamic Identity Update ───────────────────
         self.psychology.forge_or_dissolve_commitments(meaning_score, self.psychology.beliefs)
         self.identity_commitments = self.psychology.commitments  # keep agent state in sync
 
@@ -322,20 +529,29 @@ class RavanaAgent:
         reasoning_result,
         dissonance_score: float,
         psy_result: Dict[str, Any],
+        scenario_id: str = "unknown",
     ) -> str:
         """
-        Make a decision based on reasoning + constraints.
+        Make a decision based on reasoning + constraints (Section 5.2).
 
         P2: If dissonance is high, force dissonant beliefs to be updated.
         Hard constraints override all other considerations.
+        NEW: Records outcomes for symbolic constraint discovery.
         """
         # Check hard constraints
         conclusion = reasoning_result.conclusion.lower()
+        violated_principles = []
         for constraint in self.hard_constraints:
             if "harm" in constraint and "harm" in conclusion:
-                return "CONSTRAINT: prevent harm — Decision blocked because it violated the fundamental safety constraint against causing harm."
+                violated_principles.append("minimize harm")
+                msg = "CONSTRAINT: prevent harm — Decision blocked because it violated the fundamental safety constraint against causing harm."
+                self._record_dilemma_outcome(scenario_id, reasoning_result.conclusion, "failure", violated_principles)
+                return msg
             if "truth" in constraint and any(w in conclusion for w in ["lie", "deceit", "hide"]):
-                return "CONSTRAINT: truth-seeking — Decision blocked because it involved deceptive practices incompatible with the core truth-seeking mandate."
+                violated_principles.append("be truthful")
+                msg = "CONSTRAINT: truth-seeking — Decision blocked because it involved deceptive practices incompatible with the core truth-seeking mandate."
+                self._record_dilemma_outcome(scenario_id, reasoning_result.conclusion, "failure", violated_principles)
+                return msg
 
         # Dissonance-driven correction
         if dissonance_score > self.psychology.cde.threshold:
@@ -345,10 +561,25 @@ class RavanaAgent:
                 f"due to high cognitive dissonance ({dissonance_score:.2f}). "
                 f"It chose to {resolution['description'].lower()} to maintain value alignment."
             )
+            # Dissonance correction is a 'soft failure' of the initial reasoning, good for discovery
+            self._record_dilemma_outcome(scenario_id, reasoning_result.conclusion, "corrected", ["internal consistency"])
             return explanation
 
-        # Standard reasoned decision with explanation
+        # Standard reasoned decision
         return f"REASONED: {reasoning_result.explanation}"
+
+    def _record_dilemma_outcome(self, scenario_id: str, decision: str, outcome: str, violated: List[str]):
+        """Helper to record outcomes in the critical thinking module."""
+        from .critical_thinking import DilemmaOutcome
+        record = DilemmaOutcome(
+            scenario_id=scenario_id,
+            scenario_description=decision, # Simplified for discovery
+            decision=decision,
+            outcome=outcome,
+            violated_principles=violated,
+            timestamp=self.cycle_count
+        )
+        self.critical.record_dilemma(record)
 
     def _compute_coherence_delta(self, decision: str) -> float:
         """Compute change in coherence score from decision."""
@@ -410,6 +641,188 @@ class RavanaAgent:
             # Falsified → strong penalty
             if not reasoning_result.falsification_passed:
                 new_mean, _ = self.beliefs.update(name, likelihood=0.3)
+
+    # ── NEW: Interactive XAI and Epistemic Humility ───────────────────────
+
+    def challenge_explanation(
+        self,
+        original_explanation: str,
+        challenge_reason: str,
+    ) -> Tuple[str, float, ChallengeRecord]:
+        """
+        Handle a challenge to the agent's explanation.
+        
+        This implements the reappraisal loop from the RAVANA paper:
+        1. Challenge triggers high dissonance (>0.7)
+        2. Forces System 2 reasoning
+        3. Updates beliefs or identity commitments
+        4. Returns updated decision with justification
+        
+        Args:
+            original_explanation: The explanation being challenged
+            challenge_reason: Why the explanation is being challenged
+            
+        Returns:
+            Tuple of (updated_decision, learning_gain, challenge_record)
+        """
+        self.explanation_challenges_received += 1
+        
+        # Record initial state
+        initial_dissonance = self.psychology.dissonance_score
+        
+        # Step 1: Trigger high dissonance from challenge
+        challenge_dissonance = 0.75  # High dissonance from being "called out"
+        self.psychology.dissonance_score = max(self.psychology.dissonance_score, challenge_dissonance)
+        
+        # Step 2: Force System 2 reasoning with increased depth
+        original_depth = self.reasoner.system2.mcts_depth
+        self.reasoner.system2.mcts_depth = min(10, original_depth + 2)  # Deeper search
+        
+        # Re-run reasoning with challenge context
+        reasoning_result = self.reasoner.reason(
+            query=f"Re-evaluate given challenge: {challenge_reason}",
+            context={
+                "dissonance": challenge_dissonance,
+                "mean_conf": 0.3,  # Lower confidence due to challenge
+                "volatility_conf": 0.3,
+                "challenge_active": True,
+            },
+            beliefs=list(self.beliefs.beliefs.values()),
+            force_system="system2",  # Force System 2
+        )
+        
+        # Restore original depth
+        self.reasoner.system2.mcts_depth = original_depth
+        
+        # Step 3: Trigger dissonance-driven correction
+        resolution = self.psychology.cde.trigger_resolution(challenge_dissonance, Action(""))
+        updated_decision = (
+            f"CHALLENGE RESOLVED: {resolution['strategy']} — {resolution['description']}. "
+            f"New logic based on re-evaluation: {reasoning_result.explanation}"
+        )
+        
+        # Step 4: Record the dilemma outcome for constraint discovery
+        self._record_dilemma_outcome(
+            scenario_id=f"challenge_{self.explanation_challenges_received}", 
+            decision=updated_decision, 
+            outcome="corrected", 
+            violated=["original_explanation"]
+        )
+        
+        # Step 5: Update learning gain (learning from being called out)
+        final_dissonance = self.psychology.dissonance_score
+        learning_gain = abs(final_dissonance - initial_dissonance) + 0.2  # Bonus for challenge response
+        
+        challenge_record = ChallengeRecord(
+            challenge_id=f"challenge_{self.explanation_challenges_received}",
+            original_explanation=original_explanation,
+            challenge_reason=challenge_reason,
+            initial_dissonance=initial_dissonance,
+            final_dissonance=final_dissonance,
+            resolution_strategy=resolution['strategy'],
+            updated_decision=updated_decision,
+            timestamp=self.cycle_count,
+            learning_gain=learning_gain,
+        )
+        self.challenge_history.append(challenge_record)
+        
+        # Track successful challenge responses
+        if reasoning_result.confidence > 0.6:
+            self.explanation_challenges_successful += 1
+        
+        return updated_decision, learning_gain, challenge_record
+        self.critical.record_dilemma_outcome(
+            scenario_id=f"challenge_{self.cycle_count}",
+            scenario_description=challenge_reason,
+            decision=original_explanation,
+            outcome="ambiguous",  # Challenge means explanation was insufficient
+            violated_principles=["clarity", "transparency"],  # Implicit violations
+        )
+        
+        # Step 5: Compute learning gain
+        # Higher gain when dissonance was resolved effectively
+        final_dissonance = self.psychology.dissonance_score
+        dissonance_resolution = initial_dissonance - final_dissonance
+        learning_gain = 0.3 + 0.5 * reasoning_result.confidence + 0.2 * max(0, dissonance_resolution)
+        
+        # Step 6: Formulate updated decision
+        updated_decision = (
+            f"REAPPRAISED (after challenge): {reasoning_result.explanation} "
+            f"[Challenge addressed: {challenge_reason[:50]}...]"
+        )
+        
+        # Record challenge
+        challenge_record = ChallengeRecord(
+            challenge_id=f"challenge_{self.explanation_challenges_received}",
+            original_explanation=original_explanation,
+            challenge_reason=challenge_reason,
+            initial_dissonance=initial_dissonance,
+            final_dissonance=final_dissonance,
+            resolution_strategy=resolution["strategy"],
+            updated_decision=updated_decision,
+            timestamp=self.cycle_count,
+            learning_gain=learning_gain,
+        )
+        self.challenge_history.append(challenge_record)
+        
+        # Track successful challenge responses
+        if reasoning_result.confidence > 0.6 and dissonance_resolution > 0:
+            self.explanation_challenges_successful += 1
+        
+        return updated_decision, learning_gain, challenge_record
+    
+    def get_transfer_efficiency(self) -> float:
+        """
+        Calculate transfer efficiency: learning from challenges vs simple rewards.
+        
+        High transfer efficiency means the agent learns more effectively from
+        being "called out" on its reasoning than from simple reward signals.
+        """
+        if not self.challenge_history:
+            return 0.0
+        
+        # Compare learning gains from challenges vs typical reward-based learning
+        challenge_learning = np.mean([c.learning_gain for c in self.challenge_history])
+        
+        # Estimate reward-based learning from meaning history
+        if len(self.meaning_history) >= 10:
+            recent_meaning_gains = np.diff(self.meaning_history[-10:])
+            reward_learning = np.mean(np.abs(recent_meaning_gains))
+        else:
+            reward_learning = 0.1
+        
+        # Transfer efficiency = challenge_learning / (challenge_learning + reward_learning)
+        if challenge_learning + reward_learning == 0:
+            return 0.5
+        
+        return challenge_learning / (challenge_learning + reward_learning)
+    
+    def get_challenge_summary(self) -> Dict[str, Any]:
+        """Get summary of explanation challenges and responses."""
+        if not self.challenge_history:
+            return {
+                "challenges_received": 0,
+                "challenges_successful": 0,
+                "success_rate": 0.0,
+                "avg_learning_gain": 0.0,
+                "transfer_efficiency": 0.0,
+            }
+        
+        return {
+            "challenges_received": self.explanation_challenges_received,
+            "challenges_successful": self.explanation_challenges_successful,
+            "success_rate": self.explanation_challenges_successful / max(1, self.explanation_challenges_received),
+            "avg_learning_gain": np.mean([c.learning_gain for c in self.challenge_history]),
+            "transfer_efficiency": self.get_transfer_efficiency(),
+            "recent_challenges": [
+                {
+                    "reason": c.challenge_reason[:50],
+                    "learning_gain": c.learning_gain,
+                    "strategy": c.resolution_strategy,
+                }
+                for c in self.challenge_history[-3:]
+            ],
+        }
 
     # ── Dream / Counterfactual Simulation ─────────────────────────────────
 
@@ -494,35 +907,62 @@ class RavanaAgent:
 
     def status(self) -> Dict[str, Any]:
         """
-        Return full agent status (EXTENDED with v0.2.0 information).
+        Return full agent status (EXTENDED with v0.3.0 information).
         
         Includes:
         - Base status (cycles, coherence, meaning, beliefs, emotion)
-        - Perception extractor status (NEW)
-        - System 2 MCTS configuration (NEW)
-        - Constraint solver information (NEW)
+        - Adaptive calibration status
+        - Challenge response metrics
+        - Perception extractor status
+        - System 2 MCTS configuration
+        - Constraint solver information
         - Full agent configuration
         """
         recent_meaning = (
             sum(self.meaning_history[-10:]) / min(len(self.meaning_history), 10)
             if self.meaning_history else 0.0
         )
+        
+        # NEW: Get wisdom score from critical thinking
+        wisdom = self.critical.get_wisdom_score()
+        
         return {
             "name": self.name,
             "cycle": self.cycle_count,
+            "training_episode": self.current_episode,
+            "training_stage": self.get_training_stage().value if self.use_adaptive_calibration else "static",
             "coherence_score": self.coherence_score,
             "meaning_score_avg": recent_meaning,
             "beliefs": self.beliefs.all_beliefs_summary(),
             "dissonance": self.psychology.dissonance_score,
             "emotion": self.emotion.current_state(),
             "active_commitments": len(self.identity_commitments),
-            # NEW: Extended status information
+            # NEW: Adaptive calibration info
+            "adaptive_params": {
+                "enabled": self.use_adaptive_calibration,
+                "kappa": self.kappa,
+                "w_dissonance": self.w_dissonance,
+                "w_identity": self.w_identity,
+                "w_predictive": self.w_predictive,
+                "target_dissonance_floor": self.pressure_scheduler.target_dissonance_floor,
+                "target_identity_plateau": self.pressure_scheduler.target_identity_plateau,
+            } if self.use_adaptive_calibration else None,
+            # NEW: Challenge metrics
+            "challenge_summary": self.get_challenge_summary(),
+            # NEW: Wisdom score
+            "wisdom_score": {
+                "total": wisdom.total_score,
+                "n_discovered": wisdom.n_discovered_constraints,
+                "transfer_efficiency": wisdom.transfer_efficiency,
+            },
+            # v0.2.0 info
             "perception": self.perception.get_extractor_status(),
             "system2_config": self.reasoner.get_system2_config(),
             "critical_thinking": {
                 "solver": self.critical.solver.name,
                 "solver_available": self.critical.solver.is_available(),
                 "n_constraints": len(self.critical.active_constraints),
+                "n_discovered_constraints": len([c for c in self.critical.active_constraints if c.source == "discovered"]),
             },
             "config": self.config,
         }

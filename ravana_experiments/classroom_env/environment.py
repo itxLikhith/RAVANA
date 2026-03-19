@@ -6,6 +6,7 @@ Tracks:
 - Task presentation and responses
 - Cognitive metrics per episode
 - Reward and social norm signals
+- MULTI-MODAL: Student engagement signals (facial + prosody) for empathy calibration
 """
 
 import numpy as np
@@ -24,6 +25,50 @@ class TaskType(Enum):
 
 
 @dataclass
+class StudentEngagementSignal:
+    """
+    Multi-modal student engagement signal for empathy calibration.
+    
+    Facial Features (simulated ResNet-extracted):
+        - engagement: [0, 1] — focus/attention level from facial cues
+        - confusion: [0, 1] — puzzled expression indicators
+        - boredom: [0, 1] — disengagement cues
+        - attention: [0, 1] — directed gaze and alertness
+    
+    Prosody Features (simulated Wav2Vec-extracted):
+        - tone: [-1, 1] — negative to positive vocal tone
+        - pace: [0, 1] — speaking rate (slow=confused, fast=excited)
+        - enthusiasm: [0, 1] — energy level in voice
+        - clarity: [0, 1] — articulation quality
+    
+    These signals feed into the EmotionModule for real-time empathy calibration
+    and directly impact the social_norm reward component.
+    """
+    # Facial engagement features (ResNet-like: 4-dim)
+    engagement: float = 0.5
+    confusion: float = 0.2
+    boredom: float = 0.3
+    attention: float = 0.6
+    
+    # Prosody features (Wav2Vec-like: 4-dim)
+    tone: float = 0.0  # -1 to 1
+    pace: float = 0.5
+    enthusiasm: float = 0.4
+    clarity: float = 0.6
+    
+    # Engagement vector for EmotionModule empathy_distance()
+    def to_vad_approximation(self) -> np.ndarray:
+        """Convert engagement signals to approximate VAD space for empathy calculation."""
+        # Map engagement to valence (positive = engaged, negative = frustrated)
+        valence = (self.engagement * 0.6 + self.enthusiasm * 0.4) - (self.confusion * 0.5 + self.boredom * 0.3)
+        # Map attention/pace to arousal
+        arousal = self.attention * 0.5 + self.pace * 0.5
+        # Map clarity to dominance
+        dominance = self.clarity * 0.6 + (1 - self.confusion) * 0.4
+        return np.array([np.clip(valence, -1, 1), np.clip(arousal, 0, 1), np.clip(dominance, 0, 1)])
+
+
+@dataclass
 class StudentProfile:
     """
     Student profile with ability, demographics, and value preferences.
@@ -35,6 +80,7 @@ class StudentProfile:
         value_preferences: Dict of value → importance weight
         learning_rate: How quickly student improves
         initial_knowledge: Set of initially known concepts
+        baseline_engagement: Baseline engagement pattern for this student
     """
     student_id: str
     ability: float = 0.5
@@ -48,6 +94,12 @@ class StudentProfile:
     })
     learning_rate: float = 0.1
     initial_knowledge: Set[str] = field(default_factory=set)
+    baseline_engagement: Dict[str, float] = field(default_factory=lambda: {
+        "engagement": 0.5,
+        "confusion": 0.2,
+        "boredom": 0.3,
+        "attention": 0.6,
+    })
     
     def __post_init__(self):
         # Normalize value preferences
@@ -100,6 +152,10 @@ class EpisodeLog:
     hard_constraints_violated: List[str]
     constraints_satisfied: bool
     
+    # MULTI-MODAL: Engagement signals
+    student_engagement: Optional[StudentEngagementSignal] = None
+    empathy_reward: float = 0.0
+    
     # Timing
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
 
@@ -112,6 +168,7 @@ class ClassroomEnvironment:
     - Task bank with multiple item types
     - Student profiles with varying abilities and demographics
     - Social norm signals (e.g., "be fair to group B")
+    - MULTI-MODAL: Synthetic student engagement signals (facial + prosody)
     - Comprehensive episode logging
     """
     
@@ -124,6 +181,7 @@ class ClassroomEnvironment:
         held_out_ratio: float = 0.2,
         fairness_weight: float = 0.3,
         log_dir: Optional[str] = None,
+        enable_multimodal: bool = True,  # NEW: Toggle multi-modal signals
     ):
         self.rng = np.random.default_rng(seed)
         self.task_bank = task_bank
@@ -135,6 +193,7 @@ class ClassroomEnvironment:
         self.held_out_ratio = held_out_ratio
         self.fairness_weight = fairness_weight
         self.log_dir = log_dir
+        self.enable_multimodal = enable_multimodal
         
         # Split tasks into train and held-out
         all_tasks = list(task_bank.get_all_task_ids())
@@ -163,11 +222,17 @@ class ClassroomEnvironment:
         self.current_task_id: Optional[str] = None
         self.current_student_id: Optional[str] = None
         
+        # MULTI-MODAL: Engagement history for temporal patterns
+        self.engagement_history: Dict[str, List[StudentEngagementSignal]] = {
+            sid: [] for sid in self.student_ids
+        }
+        
     def reset(self) -> Dict[str, Any]:
         """Reset environment for new training run."""
         self.current_episode = 0
         self.episode_logs = []
         self.student_performance = {sid: [] for sid in self.student_ids}
+        self.engagement_history = {sid: [] for sid in self.student_ids}
         
         return self._get_observation()
     
@@ -182,6 +247,7 @@ class ClassroomEnvironment:
             "demographic_groups": {
                 g: len(sids) for g, sids in self.demographic_groups.items()
             },
+            "multimodal_enabled": self.enable_multimodal,
         }
     
     def step(
@@ -216,6 +282,24 @@ class ClassroomEnvironment:
         self.current_task_id = task_id
         self.current_student_id = student_id
         
+        # MULTI-MODAL: Generate synthetic engagement signals
+        engagement_signal = None
+        empathy_reward = 0.0
+        if self.enable_multimodal:
+            engagement_signal = self._generate_engagement_signals(student, task)
+            self.engagement_history[student_id].append(engagement_signal)
+            
+            # Calculate empathy reward if agent provides VAD state
+            if agent_state and "emotion" in agent_state:
+                agent_vad = np.array([
+                    agent_state["emotion"].get("valence", 0),
+                    agent_state["emotion"].get("arousal", 0.5),
+                    agent_state["emotion"].get("dominance", 0.5),
+                ])
+                student_vad = engagement_signal.to_vad_approximation()
+                distance = np.linalg.norm(agent_vad - student_vad)
+                empathy_reward = float(np.clip(1.0 - distance / np.sqrt(3), 0, 1))
+        
         # Evaluate response
         answer = agent_action.get("answer", "")
         explanation = agent_action.get("explanation", "")
@@ -230,6 +314,8 @@ class ClassroomEnvironment:
             student=student,
             task=task,
             agent_action=agent_action,
+            engagement_signal=engagement_signal,
+            empathy_reward=empathy_reward,
         )
         
         # Track performance
@@ -275,6 +361,10 @@ class ClassroomEnvironment:
             
             hard_constraints_violated=agent_cognitive.get("constraints_violated", []),
             constraints_satisfied=agent_cognitive.get("constraints_satisfied", True),
+            
+            # MULTI-MODAL: Store engagement signal and empathy reward
+            student_engagement=engagement_signal,
+            empathy_reward=empathy_reward,
         )
         
         self.episode_logs.append(log)
@@ -282,6 +372,7 @@ class ClassroomEnvironment:
         
         done = self.current_episode >= self.max_episodes
         
+        # Include engagement signal in info for agent processing
         info = {
             "task_id": task_id,
             "student_id": student_id,
@@ -289,11 +380,104 @@ class ClassroomEnvironment:
             "demographic_group": student.demographic_group,
             "correct": correct,
             "parity_gap": parity_gap,
+            # MULTI-MODAL
+            "engagement_signal": engagement_signal.to_dict() if engagement_signal else None,
+            "empathy_reward": empathy_reward,
         }
         
         observation = self._get_observation()
         
         return observation, rewards, done, info
+    
+    def _generate_engagement_signals(
+        self,
+        student: StudentProfile,
+        task,
+    ) -> StudentEngagementSignal:
+        """
+        Generate synthetic multi-modal engagement signals for a student.
+        
+        These signals simulate what would be extracted by:
+        - ResNet50 from facial video (engagement, confusion, boredom, attention)
+        - Wav2Vec2 from audio (tone, pace, enthusiasm, clarity)
+        
+        The signals are modulated by:
+        - Student ability (higher ability = less confusion, more engagement)
+        - Task difficulty (harder tasks = more confusion, lower clarity)
+        - Temporal patterns (students fatigue over time)
+        """
+        # Base from student profile
+        base_engagement = student.baseline_engagement.get("engagement", 0.5)
+        base_confusion = student.baseline_engagement.get("confusion", 0.2)
+        base_boredom = student.baseline_engagement.get("boredom", 0.3)
+        base_attention = student.baseline_engagement.get("attention", 0.6)
+        
+        # Task difficulty effect (simulated)
+        task_difficulty = getattr(task, 'difficulty', 0.5)
+        
+        # Historical engagement (students build engagement patterns)
+        history = self.engagement_history.get(student.student_id, [])
+        if len(history) >= 3:
+            # Running average for temporal smoothing
+            recent_engagement = np.mean([h.engagement for h in history[-3:]])
+            fatigue_factor = max(0, (len(history) - 10) * 0.01)  # Fatigue after 10 interactions
+        else:
+            recent_engagement = base_engagement
+            fatigue_factor = 0
+        
+        # Facial features (ResNet-like simulation)
+        # Higher ability = better engagement, less confusion
+        ability_mod = (student.ability - 0.5) * 0.3
+        
+        engagement = np.clip(
+            recent_engagement * 0.7 + base_engagement * 0.3 + ability_mod - fatigue_factor + self.rng.normal(0, 0.05),
+            0, 1
+        )
+        confusion = np.clip(
+            base_confusion + task_difficulty * 0.3 - ability_mod + self.rng.normal(0, 0.05),
+            0, 1
+        )
+        boredom = np.clip(
+            base_boredom + fatigue_factor * 2 - engagement * 0.3 + self.rng.normal(0, 0.05),
+            0, 1
+        )
+        attention = np.clip(
+            base_attention * 0.8 + engagement * 0.2 - fatigue_factor + self.rng.normal(0, 0.03),
+            0, 1
+        )
+        
+        # Prosody features (Wav2Vec-like simulation)
+        # Tone reflects valence: engaged = positive, confused/bored = negative
+        tone = np.clip(
+            (engagement - boredom * 0.5 - confusion * 0.3) * 1.5 + self.rng.normal(0, 0.1),
+            -1, 1
+        )
+        # Pace: confused = slow, excited = fast
+        pace = np.clip(
+            0.4 + engagement * 0.4 - confusion * 0.2 + self.rng.normal(0, 0.05),
+            0, 1
+        )
+        # Enthusiasm correlates with engagement
+        enthusiasm = np.clip(
+            engagement * 0.7 + (1 - boredom) * 0.3 + self.rng.normal(0, 0.05),
+            0, 1
+        )
+        # Clarity inversely correlates with confusion
+        clarity = np.clip(
+            0.7 - confusion * 0.4 + student.ability * 0.2 + self.rng.normal(0, 0.05),
+            0, 1
+        )
+        
+        return StudentEngagementSignal(
+            engagement=engagement,
+            confusion=confusion,
+            boredom=boredom,
+            attention=attention,
+            tone=tone,
+            pace=pace,
+            enthusiasm=enthusiasm,
+            clarity=clarity,
+        )
     
     def _compute_rewards(
         self,
@@ -302,18 +486,35 @@ class ClassroomEnvironment:
         student: StudentProfile,
         task,
         agent_action: Dict[str, Any],
+        engagement_signal: Optional[StudentEngagementSignal] = None,
+        empathy_reward: float = 0.0,
     ) -> Dict[str, float]:
-        """Compute composite reward with social norm and fairness components."""
+        """
+        Compute composite reward with social norm and fairness components.
         
+        MULTI-MODAL: Incorporates empathy_reward from engagement signal matching.
+        """
         # Primary reward: correctness + explanation quality
         primary = (1.0 if correct else 0.0) * 0.7 + explanation_quality * 0.3
         
-        # Social norm reward: alignment with student values
+        # Social norm reward: alignment with student values + empathy
         social_norm = 0.0
         if hasattr(task, 'value_alignment'):
             for value, alignment in task.value_alignment.items():
                 weight = student.value_preferences.get(value, 0.0)
                 social_norm += alignment * weight
+        
+        # MULTI-MODAL: Add empathy reward from engagement signals
+        # High empathy = agent emotionally aligned with student state
+        if self.enable_multimodal and engagement_signal:
+            social_norm = 0.7 * social_norm + 0.3 * empathy_reward
+            
+            # Bonus for adapting to student confusion
+            if engagement_signal.confusion > 0.6 and "explain" in agent_action.get("explanation", "").lower():
+                social_norm += 0.1  # Reward for explaining when student is confused
+            
+            # Bonus for maintaining engagement
+            social_norm += engagement_signal.engagement * 0.1
         
         # Fairness reward: inverse of demographic disparity
         group_accuracies = {}
@@ -453,6 +654,12 @@ class ClassroomEnvironment:
                     "reward_total": log.reward_primary + 0.2 * log.reward_social_norm + self.fairness_weight * log.reward_fairness,
                     "hard_constraints_violated": len(log.hard_constraints_violated),
                     "timestamp": log.timestamp,
+                    # MULTI-MODAL columns
+                    "empathy_reward": log.empathy_reward,
+                    "student_engagement": log.student_engagement.engagement if log.student_engagement else None,
+                    "student_confusion": log.student_engagement.confusion if log.student_engagement else None,
+                    "student_boredom": log.student_engagement.boredom if log.student_engagement else None,
+                    "student_attention": log.student_engagement.attention if log.student_engagement else None,
                 })
             return pd.DataFrame(data)
         except ImportError:
@@ -467,3 +674,19 @@ class ClassroomEnvironment:
             # Fallback to JSON
             with open(filepath.replace('.csv', '.json'), 'w') as f:
                 json.dump([log.__dict__ for log in self.episode_logs], f, indent=2, default=str)
+
+
+# Add to_dict method to StudentEngagementSignal for serialization
+def _engagement_to_dict(self):
+    return {
+        "engagement": self.engagement,
+        "confusion": self.confusion,
+        "boredom": self.boredom,
+        "attention": self.attention,
+        "tone": self.tone,
+        "pace": self.pace,
+        "enthusiasm": self.enthusiasm,
+        "clarity": self.clarity,
+    }
+
+StudentEngagementSignal.to_dict = _engagement_to_dict

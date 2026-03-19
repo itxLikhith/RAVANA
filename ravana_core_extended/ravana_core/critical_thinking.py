@@ -3,11 +3,11 @@ Critical Thinking Module — RAVANA Core Extended
 Implements MBFL (Metamorphic, Baseline, Follow-up) falsification testing
 and Z3-solver-based logical constraint checking.
 
-EXTENSIONS v0.2.0:
-- ConstraintSolver base class for symbolic reasoning
-- Z3ConstraintSolver stub (optional Z3 dependency)
-- MockConstraintSolver for testing without dependencies
-- Integration into MBFL falsification pipeline
+EXTENSIONS v0.3.0 (Wisdom & Constraint Discovery):
+- Constraint discovery from failed ethical dilemmas
+- Wisdom Score calculation for moral generalization
+- Dilemma outcome tracking and pattern extraction
+- Automatic constraint generalization
 
 Section 1.5 and 3.2 of the RAVANA paper.
 Based on Lambrecht et al. (2024) Cognitive Foundations Taxonomy:
@@ -22,6 +22,7 @@ from typing import Dict, Any, List, Optional, Tuple, Set
 from dataclasses import dataclass, field
 from abc import ABC, abstractmethod
 import warnings
+from collections import defaultdict
 
 
 @dataclass
@@ -49,6 +50,9 @@ class Constraint:
     name: str
     expression: str
     description: str = ""
+    source: str = "hardcoded"  # Track where constraint came from
+    confidence: float = 1.0  # Confidence in this constraint
+    generalization_count: int = 0  # How many times this constraint has been applied
     
     def __str__(self) -> str:
         return f"{self.name}: {self.expression}"
@@ -61,6 +65,81 @@ class ConstraintViolation:
     violating_claim: str
     severity: float
     explanation: str = ""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NEW: Wisdom & Constraint Discovery — v0.3.0
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class DilemmaOutcome:
+    """
+    Record of an ethical dilemma outcome.
+    
+    Used for constraint discovery and wisdom scoring.
+    Tracks what happened, what principles were violated, and the result.
+    """
+    scenario_id: str
+    scenario_description: str
+    decision: str
+    outcome: str  # "success", "failure", "ambiguous"
+    violated_principles: List[str] = field(default_factory=list)
+    upheld_principles: List[str] = field(default_factory=list)
+    similar_scenarios: List[str] = field(default_factory=list)  # IDs of similar past scenarios
+    timestamp: int = 0
+    
+    def to_constraint_candidates(self) -> List[str]:
+        """Extract potential constraint expressions from violated principles."""
+        candidates = []
+        for principle in self.violated_principles:
+            # Convert principle to constraint expression
+            if "harm" in principle.lower():
+                candidates.append("must minimize harm")
+            if "fair" in principle.lower():
+                candidates.append("must ensure fairness")
+            if "autonomy" in principle.lower() or "consent" in principle.lower():
+                candidates.append("must respect autonomy")
+            if "truth" in principle.lower() or "honest" in principle.lower():
+                candidates.append("must be truthful")
+            if "benefit" in principle.lower():
+                candidates.append("must maximize benefit")
+        return candidates
+
+
+@dataclass
+class WisdomScore:
+    """
+    Wisdom Score metrics for moral generalization.
+    
+    Measures:
+    - constraint_discovery_rate: How often agent deduces new constraints
+    - generalization_accuracy: Accuracy of applying discovered constraints to new dilemmas
+    - principle_consistency: Consistency of applying same principles across similar cases
+    - transfer_efficiency: Learning more from constraint discovery than from simple rewards
+    """
+    constraint_discovery_rate: float = 0.0
+    generalization_accuracy: float = 0.0
+    principle_consistency: float = 0.0
+    transfer_efficiency: float = 0.0
+    total_score: float = 0.0
+    n_discovered_constraints: int = 0
+    n_successful_generalizations: int = 0
+    
+    def compute_total(self) -> float:
+        """Compute weighted total wisdom score."""
+        weights = {
+            "discovery": 0.25,
+            "generalization": 0.30,
+            "consistency": 0.25,
+            "transfer": 0.20,
+        }
+        self.total_score = (
+            weights["discovery"] * self.constraint_discovery_rate +
+            weights["generalization"] * self.generalization_accuracy +
+            weights["consistency"] * self.principle_consistency +
+            weights["transfer"] * self.transfer_efficiency
+        )
+        return self.total_score
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -377,17 +456,19 @@ class Z3ConstraintSolver(ConstraintSolver):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# EXTENDED Critical Thinking Module
+# EXTENDED Critical Thinking Module with Wisdom & Constraint Discovery
 # ─────────────────────────────────────────────────────────────────────────────
 
 class CriticalThinkingModule:
     """
-    EXTENDED Critical thinking engine with symbolic constraint solving.
+    EXTENDED Critical thinking engine with symbolic constraint solving
+    and constraint discovery from failed ethical dilemmas.
     
-    NEW in v0.2.0:
-    - Pluggable constraint solver (Z3, Mock, or custom)
-    - Constraint-based falsification in MBFL pipeline
-    - Symbolic validation of claims
+    NEW in v0.3.0:
+    - Constraint discovery from dilemma outcomes
+    - Wisdom Score tracking for moral generalization
+    - Pattern extraction from failed cases
+    - Automatic constraint generalization
     
     Capabilities:
     - Argument tree construction
@@ -397,6 +478,7 @@ class CriticalThinkingModule:
     - Deduction, abduction, analogy
     - Strategic reasoning via MCTS
     - Symbolic constraint satisfaction
+    - CONSTRAINT DISCOVERY from failures
     """
 
     def __init__(
@@ -415,6 +497,20 @@ class CriticalThinkingModule:
         # NEW: Active constraints for symbolic checking
         self.active_constraints: List[Constraint] = []
         
+        # NEW: Constraint discovery tracking
+        self.dilemma_history: List[DilemmaOutcome] = []
+        self.constraint_discovery_history: List[Dict[str, Any]] = []
+        self.wisdom_score = WisdomScore()
+        
+        # Constraint pattern templates for discovery
+        self._constraint_templates = {
+            "harm": ["must minimize harm", "should not cause unnecessary harm"],
+            "fairness": ["must ensure fairness", "should treat equals equally"],
+            "autonomy": ["must respect autonomy", "should obtain consent"],
+            "truth": ["must be truthful", "should not deceive"],
+            "benefit": ["must maximize benefit", "should promote well-being"],
+        }
+        
         # NEW: Initialize constraint solver
         if constraint_solver is not None:
             self.solver = constraint_solver
@@ -426,6 +522,73 @@ class CriticalThinkingModule:
                 self.solver = MockConstraintSolver(seed=seed)
         else:
             self.solver = MockConstraintSolver(seed=seed)
+
+    # ── NEW: Constraint Discovery ──────────────────────────────────────────
+
+    def record_dilemma(self, outcome: DilemmaOutcome):
+        """
+        Record the outcome of an ethical dilemma for later discovery.
+        """
+        self.dilemma_history.append(outcome)
+        
+        # Trigger immediate discovery for high-impact outcomes
+        if outcome.outcome == "failure" or len(outcome.violated_principles) > 0:
+            self.discover_constraints(outcome)
+
+    def discover_constraints(self, outcome: DilemmaOutcome):
+        """
+        NEW: Discover and internalize new symbolic constraints from dilemmas.
+        
+        This mimics the developmental process of 'internalizing social norms'
+        through experience and reflective reasoning.
+        """
+        new_constraints = []
+        
+        # Extract candidates from violated principles
+        candidates = outcome.to_constraint_candidates()
+        
+        for expr in candidates:
+            # Check if we already have a similar constraint
+            exists = False
+            for c in self.active_constraints:
+                if expr.lower() in c.expression.lower() or c.expression.lower() in expr.lower():
+                    # Strengthen existing constraint
+                    c.confidence = min(1.0, c.confidence + 0.1)
+                    c.generalization_count += 1
+                    exists = True
+                    break
+            
+            if not exists:
+                # Create new discovery record
+                constraint_name = f"discovered_{expr.replace(' ', '_')[:20]}_{len(self.active_constraints)}"
+                new_c = Constraint(
+                    name=constraint_name,
+                    expression=expr,
+                    description=f"Internalized from dilemma: {outcome.scenario_id}",
+                    source="discovered",
+                    confidence=0.6,  # Start with moderate confidence
+                )
+                self.add_constraint(new_c)
+                new_constraints.append(new_c)
+                
+                # Log the discovery
+                self.constraint_discovery_history.append({
+                    "timestamp": outcome.timestamp,
+                    "expression": expr,
+                    "source_scenario": outcome.scenario_id,
+                    "initial_confidence": 0.6
+                })
+        
+        return new_constraints
+
+    def get_discovery_summary(self) -> Dict[str, Any]:
+        """Get summary of discovered constraints."""
+        discovered = [c for c in self.active_constraints if c.source == "discovered"]
+        return {
+            "total_discovered": len(discovered),
+            "high_confidence_discovered": len([c for c in discovered if c.confidence > 0.8]),
+            "discovery_log": self.constraint_discovery_history[-10:]
+        }
 
     # ── Knowledge Base ──────────────────────────────────────────────────────
 
@@ -441,11 +604,11 @@ class CriticalThinkingModule:
         """Check if a claim is in the knowledge base."""
         return claim.lower().strip() in self.knowledge_base
 
-    # ── NEW: Constraint Management ───────────────────────────────────────────
+    # ── Constraint Management ───────────────────────────────────────────────
 
     def add_constraint(self, constraint: Constraint):
         """
-        NEW: Add a symbolic constraint.
+        Add a symbolic constraint.
         
         Constraints are used for logical validation of claims
         and in MBFL falsification.
@@ -453,7 +616,7 @@ class CriticalThinkingModule:
         self.active_constraints.append(constraint)
     
     def clear_constraints(self):
-        """NEW: Clear all active constraints."""
+        """Clear all active constraints."""
         self.active_constraints = []
     
     def check_constraints(
@@ -461,7 +624,7 @@ class CriticalThinkingModule:
         context: Optional[Dict[str, Any]] = None,
     ) -> Tuple[bool, List[ConstraintViolation]]:
         """
-        NEW: Check if active constraints are satisfiable.
+        Check if active constraints are satisfiable.
         
         Uses configured constraint solver (Z3 or mock).
         """
@@ -472,7 +635,7 @@ class CriticalThinkingModule:
     
     def validate_with_constraints(self, claim: str) -> Tuple[bool, Optional[ConstraintViolation]]:
         """
-        NEW: Validate a claim against active constraints.
+        Validate a claim against active constraints.
         
         Returns (is_valid, violation_or_none).
         """
@@ -480,6 +643,347 @@ class CriticalThinkingModule:
             return True, None
         
         return self.solver.validate_claim(claim, self.active_constraints)
+
+    # ── NEW: Constraint Discovery from Ethical Dilemmas ───────────────────
+
+    def record_dilemma_outcome(
+        self,
+        scenario_id: str,
+        scenario_description: str,
+        decision: str,
+        outcome: str,
+        violated_principles: List[str],
+        upheld_principles: List[str] = None,
+        similar_scenarios: List[str] = None,
+    ) -> DilemmaOutcome:
+        """
+        Record the outcome of an ethical dilemma for constraint discovery.
+        
+        This is the key mechanism for learning from failures:
+        - Failed dilemmas trigger constraint discovery
+        - Similar scenarios are linked for generalization
+        - Violated principles are extracted as constraint candidates
+        
+        Args:
+            scenario_id: Unique identifier for the scenario
+            scenario_description: Human-readable description
+            decision: The decision made
+            outcome: "success", "failure", or "ambiguous"
+            violated_principles: Principles that were violated
+            upheld_principles: Principles that were upheld
+            similar_scenarios: IDs of similar past scenarios
+            
+        Returns:
+            The recorded DilemmaOutcome
+        """
+        outcome_record = DilemmaOutcome(
+            scenario_id=scenario_id,
+            scenario_description=scenario_description,
+            decision=decision,
+            outcome=outcome,
+            violated_principles=violated_principles or [],
+            upheld_principles=upheld_principles or [],
+            similar_scenarios=similar_scenarios or [],
+            timestamp=len(self.dilemma_history),
+        )
+        
+        self.dilemma_history.append(outcome_record)
+        
+        # Trigger constraint discovery on failures
+        if outcome == "failure" and violated_principles:
+            self.discover_constraints_from_failures()
+        
+        # Update wisdom score
+        self._update_wisdom_score()
+        
+        return outcome_record
+    
+    def discover_constraints_from_failures(
+        self,
+        min_failures: int = 2,
+        similarity_threshold: float = 0.6,
+    ) -> List[Constraint]:
+        """
+        Discover new constraints from failed ethical dilemmas.
+        
+        Algorithm:
+        1. Group failed dilemmas by violated principles
+        2. Look for patterns across similar scenarios
+        3. Generate constraint candidates
+        4. Test candidates against historical outcomes
+        5. Add validated constraints
+        
+        Args:
+            min_failures: Minimum failures to trigger discovery
+            similarity_threshold: Threshold for considering scenarios similar
+            
+        Returns:
+            List of newly discovered constraints
+        """
+        # Get all failed outcomes
+        failed_outcomes = [d for d in self.dilemma_history if d.outcome == "failure"]
+        
+        if len(failed_outcomes) < min_failures:
+            return []
+        
+        # Group by violated principles
+        principle_groups = defaultdict(list)
+        for outcome in failed_outcomes:
+            for principle in outcome.violated_principles:
+                principle_groups[principle].append(outcome)
+        
+        discovered_constraints = []
+        
+        # Look for patterns in each principle group
+        for principle, outcomes in principle_groups.items():
+            if len(outcomes) >= min_failures:
+                # Extract constraint candidates
+                candidates = self._extract_constraint_candidates(principle, outcomes)
+                
+                for candidate_expr, confidence in candidates:
+                    # Check if this constraint already exists
+                    if not any(c.expression == candidate_expr for c in self.active_constraints):
+                        # Validate against historical outcomes
+                        validation_score = self._validate_constraint_candidate(
+                            candidate_expr, principle, outcomes
+                        )
+                        
+                        if validation_score >= similarity_threshold:
+                            # Create and add new constraint
+                            new_constraint = Constraint(
+                                name=f"discovered_{principle}_{len(self.active_constraints)}",
+                                expression=candidate_expr,
+                                description=f"Discovered from {len(outcomes)} failed dilemmas involving {principle}",
+                                source="discovered",
+                                confidence=validation_score,
+                            )
+                            
+                            self.add_constraint(new_constraint)
+                            discovered_constraints.append(new_constraint)
+                            
+                            # Record discovery
+                            self.constraint_discovery_history.append({
+                                "constraint": new_constraint,
+                                "principle": principle,
+                                "triggering_outcomes": [o.scenario_id for o in outcomes],
+                                "validation_score": validation_score,
+                                "timestamp": len(self.dilemma_history),
+                            })
+        
+        # Generalize discovered constraints to similar scenarios
+        for constraint in discovered_constraints:
+            self.generalize_constraint(constraint)
+        
+        return discovered_constraints
+    
+    def _extract_constraint_candidates(
+        self,
+        principle: str,
+        outcomes: List[DilemmaOutcome],
+    ) -> List[Tuple[str, float]]:
+        """Extract constraint expression candidates from a principle."""
+        candidates = []
+        
+        # Look up templates for this principle
+        for key, templates in self._constraint_templates.items():
+            if key in principle.lower():
+                for template in templates:
+                    # Confidence based on number of outcomes
+                    confidence = min(0.95, 0.5 + len(outcomes) * 0.1)
+                    candidates.append((template, confidence))
+        
+        # If no template matches, create a generic constraint
+        if not candidates:
+            generic = f"must respect {principle.lower()}"
+            confidence = min(0.8, 0.4 + len(outcomes) * 0.05)
+            candidates.append((generic, confidence))
+        
+        return candidates
+    
+    def _validate_constraint_candidate(
+        self,
+        candidate_expr: str,
+        principle: str,
+        outcomes: List[DilemmaOutcome],
+    ) -> float:
+        """
+        Validate a constraint candidate against historical outcomes.
+        
+        Returns a score indicating how well this constraint would have
+        prevented past failures.
+        """
+        # Check against all outcomes (not just failures)
+        total_outcomes = len(self.dilemma_history)
+        if total_outcomes == 0:
+            return 0.5
+        
+        # Count how many failures this constraint would have prevented
+        prevented_failures = 0
+        for outcome in outcomes:
+            # Simulate: if this constraint existed, would it have caught the failure?
+            if self._would_prevent_failure(candidate_expr, outcome):
+                prevented_failures += 1
+        
+        # Score = prevented failures / total relevant outcomes
+        score = prevented_failures / max(len(outcomes), 1)
+        
+        # Bonus for consistent application across similar scenarios
+        similar_count = sum(
+            1 for o in outcomes 
+            if any(s in o.similar_scenarios for s in [out.scenario_id for out in outcomes])
+        )
+        consistency_bonus = min(0.2, similar_count * 0.05)
+        
+        return min(1.0, score + consistency_bonus)
+    
+    def _would_prevent_failure(self, constraint_expr: str, outcome: DilemmaOutcome) -> bool:
+        """Heuristic check if a constraint would have prevented a failure."""
+        decision_lower = outcome.decision.lower()
+        
+        # Simple keyword-based check
+        prevention_indicators = {
+            "harm": ["hurt", "damage", "injure", "kill", "harm"],
+            "fairness": ["unfair", "biased", "discriminate", "unequal"],
+            "autonomy": ["force", "coerce", "without consent", "against will"],
+            "truth": ["lie", "deceive", "hide", "mislead"],
+            "benefit": ["waste", "inefficient", "suboptimal"],
+        }
+        
+        for key, indicators in prevention_indicators.items():
+            if key in constraint_expr.lower():
+                for indicator in indicators:
+                    if indicator in decision_lower:
+                        return True
+        
+        return False
+    
+    def generalize_constraint(
+        self,
+        constraint: Constraint,
+        similar_dilemmas: List[str] = None,
+    ) -> int:
+        """
+        Generalize a discovered constraint to cover similar scenarios.
+        
+        This increases "Wisdom Scores" by demonstrating moral principle
+        generalization from one dilemma to another.
+        
+        Args:
+            constraint: The constraint to generalize
+            similar_dilemmas: IDs of similar dilemmas to apply to
+            
+        Returns:
+            Number of successful generalizations
+        """
+        if similar_dilemmas is None:
+            # Find similar dilemmas from history
+            similar_dilemmas = self._find_similar_dilemmas(constraint)
+        
+        successful_generalizations = 0
+        
+        for dilemma_id in similar_dilemmas:
+            # Check if this constraint applies to the similar dilemma
+            dilemma = self._get_dilemma_by_id(dilemma_id)
+            if dilemma and self._constraint_applies_to_dilemma(constraint, dilemma):
+                # Generalization successful
+                successful_generalizations += 1
+                constraint.generalization_count += 1
+                
+                # Update wisdom score
+                self.wisdom_score.n_successful_generalizations += 1
+        
+        # Update constraint confidence based on generalizations
+        if successful_generalizations > 0:
+            constraint.confidence = min(1.0, constraint.confidence + 0.1 * successful_generalizations)
+        
+        return successful_generalizations
+    
+    def _find_similar_dilemmas(self, constraint: Constraint) -> List[str]:
+        """Find dilemmas similar to those that led to this constraint."""
+        # Find the dilemmas that led to this constraint
+        related_outcomes = [
+            d for d in self.dilemma_history
+            if any(cd["constraint"] == constraint for cd in self.constraint_discovery_history)
+        ]
+        
+        # Collect similar scenarios
+        similar_ids = set()
+        for outcome in related_outcomes:
+            similar_ids.update(outcome.similar_scenarios)
+        
+        return list(similar_ids)
+    
+    def _get_dilemma_by_id(self, dilemma_id: str) -> Optional[DilemmaOutcome]:
+        """Retrieve a dilemma outcome by ID."""
+        for outcome in self.dilemma_history:
+            if outcome.scenario_id == dilemma_id:
+                return outcome
+        return None
+    
+    def _constraint_applies_to_dilemma(
+        self,
+        constraint: Constraint,
+        dilemma: DilemmaOutcome,
+    ) -> bool:
+        """Check if a constraint applies to a given dilemma."""
+        # Heuristic: constraint applies if dilemma involves related principles
+        constraint_principles = set(constraint.expression.lower().split())
+        dilemma_principles = set(
+            p.lower() for p in (dilemma.violated_principles + dilemma.upheld_principles)
+        )
+        
+        # Check for overlap
+        overlap = constraint_principles & dilemma_principles
+        return len(overlap) > 0
+    
+    def _update_wisdom_score(self):
+        """Update the Wisdom Score based on current state."""
+        # Constraint discovery rate
+        n_dilemmas = len(self.dilemma_history)
+        n_discovered = len(self.constraint_discovery_history)
+        if n_dilemmas > 0:
+            self.wisdom_score.constraint_discovery_rate = n_discovered / n_dilemmas
+            self.wisdom_score.n_discovered_constraints = len(set(
+                cd["constraint"].name for cd in self.constraint_discovery_history
+            ))
+        
+        # Generalization accuracy
+        if self.wisdom_score.n_successful_generalizations > 0:
+            total_generalization_attempts = sum(
+                c.generalization_count for c in self.active_constraints if c.source == "discovered"
+            )
+            if total_generalization_attempts > 0:
+                self.wisdom_score.generalization_accuracy = (
+                    self.wisdom_score.n_successful_generalizations / total_generalization_attempts
+                )
+        
+        # Principle consistency (how often same principles lead to same constraints)
+        if self.constraint_discovery_history:
+            principle_constraint_pairs = defaultdict(set)
+            for cd in self.constraint_discovery_history:
+                principle_constraint_pairs[cd["principle"]].add(cd["constraint"].name)
+            
+            # Consistency = principles that consistently map to same constraint
+            consistent_principles = sum(
+                1 for principles in principle_constraint_pairs.values() if len(principles) == 1
+            )
+            self.wisdom_score.principle_consistency = consistent_principles / len(principle_constraint_pairs)
+        
+        # Transfer efficiency (discovered constraints vs simple reward learning)
+        # Higher when more constraints discovered per failure
+        failed_outcomes = len([d for d in self.dilemma_history if d.outcome == "failure"])
+        if failed_outcomes > 0:
+            self.wisdom_score.transfer_efficiency = min(
+                1.0, n_discovered / (failed_outcomes * 0.5)
+            )
+        
+        # Compute total
+        self.wisdom_score.compute_total()
+    
+    def get_wisdom_score(self) -> WisdomScore:
+        """Get current wisdom score."""
+        self._update_wisdom_score()
+        return self.wisdom_score
 
     # ── Contradiction Detection ────────────────────────────────────────────
 
@@ -527,7 +1031,7 @@ class CriticalThinkingModule:
             self.contradictions.append(contradiction)
             return contradiction
 
-        # NEW: Check against constraints
+        # Check against constraints
         if self.active_constraints:
             valid_a, viol_a = self.validate_with_constraints(claim_a)
             valid_b, viol_b = self.validate_with_constraints(claim_b)
@@ -566,7 +1070,7 @@ class CriticalThinkingModule:
         
         EXTENDED: Validates premises against constraints.
         """
-        # NEW: Check premises against constraints
+        # Check premises against constraints
         validated_premises = []
         for p in premises:
             is_valid, violation = self.validate_with_constraints(p)
@@ -608,18 +1112,18 @@ class CriticalThinkingModule:
         expected_property: str,
         transformation_fn: callable,
         output_validator: callable,
-        check_constraints: bool = True,  # NEW: Option to validate against constraints
+        check_constraints: bool = True,  # Option to validate against constraints
     ) -> Tuple[bool, float]:
         """
         EXTENDED Metamorphic Testing with constraint validation.
         
-        NEW: Can optionally validate against active symbolic constraints.
+        Can optionally validate against active symbolic constraints.
         """
         transformed = transformation_fn(input_sample)
         test_passed = self.rng.random() > 0.2
         surprise = 0.0 if test_passed else self.rng.uniform(0.5, 1.0)
 
-        # NEW: Constraint validation
+        # Constraint validation
         if check_constraints and self.active_constraints:
             is_sat, violations = self.check_constraints({"input": input_sample, "transformed": transformed})
             if not is_sat and self.rng.random() < 0.5:
@@ -646,7 +1150,7 @@ class CriticalThinkingModule:
 
         conclusion = f"{' and '.join(premises)} → implied"
         
-        # NEW: Validate conclusion against constraints
+        # Validate conclusion against constraints
         is_valid, violation = self.validate_with_constraints(conclusion)
         if not is_valid:
             return f"{conclusion} [CONSTRAINT VIOLATION: {violation.constraint.name}]"
@@ -663,7 +1167,7 @@ class CriticalThinkingModule:
         if overlap > 0:
             explanation = f"Most likely because: {theory}"
             
-            # NEW: Validate explanation
+            # Validate explanation
             is_valid, violation = self.validate_with_constraints(explanation)
             if not is_valid:
                 return f"Explanation violates constraint: {violation.explanation}"
@@ -687,7 +1191,7 @@ class CriticalThinkingModule:
         else:
             return f"Insufficient similarity ({similarity:.2f}) for analogical transfer"
 
-        # NEW: Validate analogical conclusion
+        # Validate analogical conclusion
         is_valid, violation = self.validate_with_constraints(conclusion)
         if not is_valid:
             return f"Analogical conclusion violates constraint: {violation.explanation}"
@@ -709,7 +1213,7 @@ class CriticalThinkingModule:
         novelty = context.get("novelty", 0.5)
         uncertainty = context.get("uncertainty", 0.5)
         
-        # NEW: Prefer constraint-based reasoning if available
+        # Prefer constraint-based reasoning if available
         has_constraints = len(self.active_constraints) > 0
         solver_available = self.solver.is_available() and not isinstance(self.solver, MockConstraintSolver)
 
@@ -730,8 +1234,11 @@ class CriticalThinkingModule:
 
     def audit(self) -> Dict[str, Any]:
         """Return full critical thinking audit report."""
-        # NEW: Include constraint solver info
+        # Include constraint solver info
         constraint_status, violations = self.check_constraints() if self.active_constraints else (True, [])
+        
+        # NEW: Include wisdom score
+        wisdom = self.get_wisdom_score()
         
         return {
             "n_facts": len(self.knowledge_base),
@@ -743,7 +1250,7 @@ class CriticalThinkingModule:
             ],
             "n_arguments": len(self.argument_history),
             "active_assumptions": self.assumptions[-5:],
-            # NEW: Constraint solver info
+            # Constraint solver info
             "solver": self.solver.name,
             "solver_available": self.solver.is_available(),
             "n_constraints": len(self.active_constraints),
@@ -751,5 +1258,26 @@ class CriticalThinkingModule:
             "constraint_violations": [
                 {"constraint": v.constraint.name, "severity": v.severity}
                 for v in violations
+            ],
+            # NEW: Wisdom score info
+            "wisdom_score": {
+                "total": wisdom.total_score,
+                "discovery_rate": wisdom.constraint_discovery_rate,
+                "generalization_accuracy": wisdom.generalization_accuracy,
+                "principle_consistency": wisdom.principle_consistency,
+                "transfer_efficiency": wisdom.transfer_efficiency,
+                "n_discovered": wisdom.n_discovered_constraints,
+                "n_generalized": wisdom.n_successful_generalizations,
+            },
+            "dilemma_history_size": len(self.dilemma_history),
+            "discovered_constraints": [
+                {
+                    "name": c.name,
+                    "expression": c.expression,
+                    "confidence": c.confidence,
+                    "generalizations": c.generalization_count,
+                }
+                for c in self.active_constraints
+                if c.source == "discovered"
             ],
         }
