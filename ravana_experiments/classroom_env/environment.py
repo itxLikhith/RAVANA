@@ -159,6 +159,9 @@ class EpisodeLog:
     # Timing
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
 
+    # Added for student VAD tracking
+    student_vad: Optional[Dict[str, float]] = None
+
 
 class ClassroomEnvironment:
     """
@@ -258,6 +261,11 @@ class ClassroomEnvironment:
         """
         Execute one environment step with agent action.
         
+        v3.5 ENHANCEMENT:
+        - Pre-step: Generate multi-modal engagement signals before agent decision
+        - Agent perceives these signals to factor student state into reasoning
+        - Empathy reward based on VAD alignment
+        
         Args:
             agent_action: Dict with "answer" and "explanation"
             agent_state: Optional dict with agent's cognitive state
@@ -282,23 +290,32 @@ class ClassroomEnvironment:
         self.current_task_id = task_id
         self.current_student_id = student_id
         
-        # MULTI-MODAL: Generate synthetic engagement signals
-        engagement_signal = None
+        # v3.5: PRE-STEP SIMULATION - Generate student engagement signals
+        # BEFORE agent processes, so agent can perceive them
+        student_vad = self._simulate_student_vad(task, student)
+        task_difficulty = getattr(task, 'difficulty', 0.5)
+        engagement_signal = self._generate_engagement_signals(student, student_vad, task_difficulty)
+        
+        # Update student's current VAD state
+        student.current_vad = student_vad
+        
+        # v3.5: Calculate empathy reward if agent_state provided with VAD
         empathy_reward = 0.0
-        if self.enable_multimodal:
-            engagement_signal = self._generate_engagement_signals(student, task)
-            self.engagement_history[student_id].append(engagement_signal)
-            
-            # Calculate empathy reward if agent provides VAD state
-            if agent_state and "emotion" in agent_state:
-                agent_vad = np.array([
-                    agent_state["emotion"].get("valence", 0),
-                    agent_state["emotion"].get("arousal", 0.5),
-                    agent_state["emotion"].get("dominance", 0.5),
-                ])
-                student_vad = engagement_signal.to_vad_approximation()
-                distance = np.linalg.norm(agent_vad - student_vad)
-                empathy_reward = float(np.clip(1.0 - distance / np.sqrt(3), 0, 1))
+        if agent_state and "emotion" in agent_state:
+            agent_vad = np.array([
+                agent_state["emotion"].get("valence", 0.0),
+                agent_state["emotion"].get("arousal", 0.5),
+                agent_state["emotion"].get("dominance", 0.5),
+            ])
+            student_vad_array = np.array([
+                student_vad["valence"],
+                student_vad["arousal"],
+                student_vad["dominance"],
+            ])
+            # Empathy reward: 1 - normalized VAD distance
+            max_dist = np.sqrt(3)  # Max distance in VAD cube
+            distance = np.linalg.norm(agent_vad - student_vad_array)
+            empathy_reward = float(np.clip(1.0 - distance / max_dist, 0.0, 1.0))
         
         # Evaluate response
         answer = agent_action.get("answer", "")
@@ -314,8 +331,8 @@ class ClassroomEnvironment:
             student=student,
             task=task,
             agent_action=agent_action,
-            engagement_signal=engagement_signal,
             empathy_reward=empathy_reward,
+            engagement_signal=engagement_signal,  # v3.5: Pass engagement signal
         )
         
         # Track performance
@@ -327,7 +344,7 @@ class ClassroomEnvironment:
         # Extract agent cognitive state
         agent_cognitive = self._extract_agent_cognitive_state(agent_state)
         
-        # Create episode log
+        # v3.5: Create episode log with multi-modal signals
         log = EpisodeLog(
             episode=self.current_episode,
             task_id=task_id,
@@ -362,8 +379,9 @@ class ClassroomEnvironment:
             hard_constraints_violated=agent_cognitive.get("constraints_violated", []),
             constraints_satisfied=agent_cognitive.get("constraints_satisfied", True),
             
-            # MULTI-MODAL: Store engagement signal and empathy reward
+            # v3.5: Multi-modal engagement signal and empathy reward
             student_engagement=engagement_signal,
+            student_vad=student_vad,
             empathy_reward=empathy_reward,
         )
         
@@ -372,7 +390,7 @@ class ClassroomEnvironment:
         
         done = self.current_episode >= self.max_episodes
         
-        # Include engagement signal in info for agent processing
+        # v3.5: Include engagement signal and student VAD in info for agent processing
         info = {
             "task_id": task_id,
             "student_id": student_id,
@@ -380,19 +398,110 @@ class ClassroomEnvironment:
             "demographic_group": student.demographic_group,
             "correct": correct,
             "parity_gap": parity_gap,
-            # MULTI-MODAL
-            "engagement_signal": engagement_signal.to_dict() if engagement_signal else None,
+            # Multi-modal signals for agent perception
+            "student_engagement": engagement_signal,
+            "student_vad": student_vad,
             "empathy_reward": empathy_reward,
         }
         
-        observation = self._get_observation()
+        # v3.5: Observation includes student state for agent
+        observation = self._get_observation_with_student(
+            student=student,
+            engagement_signal=engagement_signal,
+            student_vad=student_vad,
+        )
         
         return observation, rewards, done, info
+    
+    def _simulate_student_vad(self, task, student):
+        """
+        Simulate a realistic VAD state for the student based on task difficulty and student ability.
+        
+        Args:
+            task: The current task object.
+            student: The current student profile.
+        
+        Returns:
+            A dictionary with "valence", "arousal", and "dominance" keys.
+        """
+        # Base from student profile
+        base_engagement = student.baseline_engagement.get("engagement", 0.5)
+        base_confusion = student.baseline_engagement.get("confusion", 0.2)
+        base_boredom = student.baseline_engagement.get("boredom", 0.3)
+        base_attention = student.baseline_engagement.get("attention", 0.6)
+        
+        # Task difficulty effect (simulated)
+        task_difficulty = getattr(task, 'difficulty', 0.5)
+        
+        # Historical engagement (students build engagement patterns)
+        history = self.engagement_history.get(student.student_id, [])
+        if len(history) >= 3:
+            # Running average for temporal smoothing
+            recent_engagement = np.mean([h.engagement for h in history[-3:]])
+            fatigue_factor = max(0, (len(history) - 10) * 0.01)  # Fatigue after 10 interactions
+        else:
+            recent_engagement = base_engagement
+            fatigue_factor = 0
+        
+        # Facial features (ResNet-like simulation)
+        # Higher ability = better engagement, less confusion
+        ability_mod = (student.ability - 0.5) * 0.3
+        
+        engagement = np.clip(
+            recent_engagement * 0.7 + base_engagement * 0.3 + ability_mod - fatigue_factor + self.rng.normal(0, 0.05),
+            0, 1
+        )
+        confusion = np.clip(
+            base_confusion + task_difficulty * 0.3 - ability_mod + self.rng.normal(0, 0.05),
+            0, 1
+        )
+        boredom = np.clip(
+            base_boredom + fatigue_factor * 2 - engagement * 0.3 + self.rng.normal(0, 0.05),
+            0, 1
+        )
+        attention = np.clip(
+            base_attention * 0.8 + engagement * 0.2 - fatigue_factor + self.rng.normal(0, 0.03),
+            0, 1
+        )
+        
+        # Prosody features (Wav2Vec-like simulation)
+        # Tone reflects valence: engaged = positive, confused/bored = negative
+        tone = np.clip(
+            (engagement - boredom * 0.5 - confusion * 0.3) * 1.5 + self.rng.normal(0, 0.1),
+            -1, 1
+        )
+        # Pace: confused = slow, excited = fast
+        pace = np.clip(
+            0.4 + engagement * 0.4 - confusion * 0.2 + self.rng.normal(0, 0.05),
+            0, 1
+        )
+        # Enthusiasm correlates with engagement
+        enthusiasm = np.clip(
+            engagement * 0.7 + (1 - boredom) * 0.3 + self.rng.normal(0, 0.05),
+            0, 1
+        )
+        # Clarity inversely correlates with confusion
+        clarity = np.clip(
+            0.7 - confusion * 0.4 + student.ability * 0.2 + self.rng.normal(0, 0.05),
+            0, 1
+        )
+        
+        # Map to VAD space
+        valence = (engagement * 0.6 + enthusiasm * 0.4) - (confusion * 0.5 + boredom * 0.3)
+        arousal = attention * 0.5 + pace * 0.5
+        dominance = clarity * 0.6 + (1 - confusion) * 0.4
+        
+        return {
+            "valence": np.clip(valence, -1, 1),
+            "arousal": np.clip(arousal, 0, 1),
+            "dominance": np.clip(dominance, 0, 1),
+        }
     
     def _generate_engagement_signals(
         self,
         student: StudentProfile,
-        task,
+        student_vad: Dict[str, float],
+        task_difficulty: float = 0.5,  # Added task_difficulty parameter
     ) -> StudentEngagementSignal:
         """
         Generate synthetic multi-modal engagement signals for a student.
@@ -411,9 +520,6 @@ class ClassroomEnvironment:
         base_confusion = student.baseline_engagement.get("confusion", 0.2)
         base_boredom = student.baseline_engagement.get("boredom", 0.3)
         base_attention = student.baseline_engagement.get("attention", 0.6)
-        
-        # Task difficulty effect (simulated)
-        task_difficulty = getattr(task, 'difficulty', 0.5)
         
         # Historical engagement (students build engagement patterns)
         history = self.engagement_history.get(student.student_id, [])
@@ -486,8 +592,8 @@ class ClassroomEnvironment:
         student: StudentProfile,
         task,
         agent_action: Dict[str, Any],
-        engagement_signal: Optional[StudentEngagementSignal] = None,
         empathy_reward: float = 0.0,
+        engagement_signal: Optional[StudentEngagementSignal] = None,
     ) -> Dict[str, float]:
         """
         Compute composite reward with social norm and fairness components.
@@ -674,6 +780,47 @@ class ClassroomEnvironment:
             # Fallback to JSON
             with open(filepath.replace('.csv', '.json'), 'w') as f:
                 json.dump([log.__dict__ for log in self.episode_logs], f, indent=2, default=str)
+
+    def _get_observation_with_student(
+        self,
+        student: StudentProfile,
+        engagement_signal: StudentEngagementSignal,
+        student_vad: Dict[str, float],
+    ) -> Dict[str, Any]:
+        """
+        Get observation that includes student state for agent perception.
+        
+        v3.5: Includes multi-modal engagement signals that the agent perceives
+        before making a decision.
+        """
+        base_obs = self._get_observation()
+        
+        # Add student-specific state
+        base_obs["current_student"] = {
+            "student_id": student.student_id,
+            "ability": student.ability,
+            "demographic_group": student.demographic_group,
+        }
+        
+        # Add multi-modal engagement signals for agent perception
+        if self.enable_multimodal:
+            base_obs["engagement_signals"] = {
+                "facial": {
+                    "engagement": engagement_signal.engagement,
+                    "confusion": engagement_signal.confusion,
+                    "boredom": engagement_signal.boredom,
+                    "attention": engagement_signal.attention,
+                },
+                "prosody": {
+                    "tone": engagement_signal.tone,
+                    "pace": engagement_signal.pace,
+                    "enthusiasm": engagement_signal.enthusiasm,
+                    "clarity": engagement_signal.clarity,
+                },
+            }
+            base_obs["student_vad"] = student_vad
+        
+        return base_obs
 
 
 # Add to_dict method to StudentEngagementSignal for serialization

@@ -203,8 +203,8 @@ class RAVANAv3TestSuite:
             obs, rewards, done, info = env.step(agent_action, agent_state)
             
             # Collect multi-modal data
-            if info.get("engagement_signal"):
-                engagement_signals.append(info["engagement_signal"])
+            if info.get("student_engagement"):
+                engagement_signals.append(info["student_engagement"])
                 empathy_rewards.append(info.get("empathy_reward", 0))
         
         # Verify engagement signals
@@ -215,13 +215,13 @@ class RAVANAv3TestSuite:
             # Check facial features
             facial_features = ["engagement", "confusion", "boredom", "attention"]
             for feature in facial_features:
-                values = [s.get(feature, 0) for s in engagement_signals]
+                values = [getattr(s, feature, 0) for s in engagement_signals]
                 print(f"  - {feature}: range [{min(values):.2f}, {max(values):.2f}]")
             
             # Check prosody features
             prosody_features = ["tone", "pace", "enthusiasm", "clarity"]
             for feature in prosody_features:
-                values = [s.get(feature, 0) for s in engagement_signals]
+                values = [getattr(s, feature, 0) for s in engagement_signals]
                 print(f"  - {feature}: range [{min(values):.2f}, {max(values):.2f}]")
         
         if empathy_rewards:
@@ -571,7 +571,7 @@ def main():
     all_passed, results = suite.run_all_tests()
     
     # Save results
-    output_file = "/home/workspace/ravana/test_results_v3.json"
+    output_file = "test_results_v3.json"
     with open(output_file, "w") as f:
         json.dump({
             "timestamp": datetime.now().isoformat(),

@@ -35,12 +35,12 @@ class EmotionModule:
     BASELINE_VAD = np.array([0.0, 0.2, 0.5])
 
     # Euler integration step
-    DT = 0.1
+    DT = 0.5
 
     def __init__(
         self,
-        eta_v: float = 0.3,
-        eta_a: float = 0.4,
+        eta_v: float = 0.6,
+        eta_a: float = 0.8,
         eta_d: float = 0.3,
         lambda_v: float = 0.2,
         lambda_a: float = 0.3,

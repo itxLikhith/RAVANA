@@ -61,15 +61,14 @@ class CognitiveDissonanceEngine:
         beliefs: List[Belief],
         action: Action,
         identity_commitments: List[IdentityCommitment],
-        arousal: float = 0.5,  # NEW: VAD arousal state
         context_variance: float = 0.1,
         free_choice_multiplier: float = 1.0,
     ) -> Tuple[float, Dict[str, float]]:
         """
-        Compute total dissonance score (Section 3.2.2).
-        
-        Arousal acts as a multiplier for cognitive load pressure:
-        D_arousal = D_base * (1 + 0.5 * arousal)
+        Compute total dissonance score.
+
+        Returns:
+            (dissonance_score, breakdown_dict)
         """
         # Component 1: Belief-action conflict
         belief_component = 0.0
@@ -89,18 +88,13 @@ class CognitiveDissonanceEngine:
             if ic.name in action.description.lower():
                 commitment_component += ic.strength * free_choice_multiplier * abs(0.5 - action.value)
 
-        # Apply arousal multiplier (cognitive load pressure)
-        # Higher arousal (stress) amplifies the internal conflict
-        base_dissonance = belief_component + identity_component + commitment_component
-        total_dissonance = base_dissonance * (1.0 + 0.5 * arousal)
-        
+        total_dissonance = belief_component + identity_component + commitment_component
         self.dissonance_history.append(total_dissonance)
 
         breakdown = {
             "belief_conflict": belief_component,
             "identity_conflict": identity_component,
             "commitment_violation": commitment_component,
-            "arousal_multiplier": 1.0 + 0.5 * arousal,
             "total": total_dissonance,
         }
         return float(total_dissonance), breakdown
@@ -381,12 +375,7 @@ class PsychologyModule:
             beliefs=beliefs or [],
         ))
 
-    def process(
-        self,
-        state: Dict[str, Any],
-        global_U: float = 0.0,
-        arousal: float = 0.5,  # NEW: VAD arousal
-    ) -> Dict[str, Any]:
+    def process(self, state: Dict[str, Any], global_U: float = 0.0) -> Dict[str, Any]:
         """
         Full psychology pipeline for one cognitive cycle.
 
@@ -407,8 +396,7 @@ class PsychologyModule:
                 drive_source=winning_drive,
             )
             D, breakdown = self.cde.compute_dissonance(
-                self.beliefs, action, self.commitments,
-                arousal=arousal,  # Pass the new parameter
+                self.beliefs, action, self.commitments
             )
             self.dissonance_score = D
         else:
@@ -442,10 +430,10 @@ class PsychologyModule:
             if meaning_score > 0.8:
                 ic.strength = min(1.0, ic.strength + 0.05)
             elif meaning_score < 0.2:
-                ic.strength = max(0.0, ic.strength - 0.1)
+                ic.strength = max(0.0, ic.strength - 0.005)
         
         # Remove dissolved commitments
-        self.commitments = [ic for ic in self.commitments if ic.strength > 0.1]
+        self.commitments = [ic for ic in self.commitments if ic.strength > 0.01]
         
         # Forge new commitment if high meaning and new strong beliefs exist
         if meaning_score > 0.9 and len(self.commitments) < 5:

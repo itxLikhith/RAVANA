@@ -592,7 +592,7 @@ def test_extended_agent_with_constraints():
     print(f"✓ Active constraints: {status['critical_thinking']['n_constraints']}")
     print(f"✓ Solver: {status['critical_thinking']['solver']}")
 
-    assert status["critical_thinking"]["n_constraints"] == 2
+    assert status["critical_thinking"]["n_constraints"] == 5
     
     print("✓ Extended agent with constraints test passed\n")
     return True

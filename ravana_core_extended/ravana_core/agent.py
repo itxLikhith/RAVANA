@@ -231,6 +231,8 @@ class RavanaAgent:
         w_predictive: float = 0.3,
         # Effort cost (will be overridden by scheduler)
         kappa: float = 0.1,
+        # v3.5: Stress amplification factor for dissonance
+        stress_amplification_factor: float = 0.3,
         # NEW: Adaptive calibration settings
         use_adaptive_calibration: bool = True,
         total_training_episodes: int = 1000000,
@@ -260,6 +262,7 @@ class RavanaAgent:
             "w_identity": w_identity,
             "w_predictive": w_predictive,
             "kappa": kappa,
+            "stress_amplification_factor": stress_amplification_factor,
             "use_adaptive_calibration": use_adaptive_calibration,
             "total_training_episodes": total_training_episodes,
             "use_resnet": use_resnet,
@@ -275,6 +278,9 @@ class RavanaAgent:
         self.use_adaptive_calibration = use_adaptive_calibration
         self.pressure_scheduler = AdaptivePressureScheduler()
         self.current_episode = 0
+        
+        # v3.5: Stress amplification for dissonance
+        self.stress_amplification_factor = stress_amplification_factor
         
         # ── Core Modules (Extended) ───────────────────────────────────
         self.perception = PerceptionModule(
@@ -354,11 +360,11 @@ class RavanaAgent:
         
         # Initialize default beliefs
         for value in self.core_values:
-            self.beliefs.add_belief(value, prior_mean=0.7, prior_variance=0.04)
+            self.beliefs.add_belief(value, prior_mean=0.6, prior_variance=0.04)
             self.psychology.add_belief(
                 proposition=value,
-                confidence=0.7,
-                emotional_weight=0.8,
+                confidence=0.6,
+                emotional_weight=0.5,
             )
 
         self._setup_default_commitments()
@@ -394,7 +400,7 @@ class RavanaAgent:
         for value in self.core_values:
             self.identity_commitments.append(IdentityCommitment(
                 name=value,
-                strength=0.7,
+                strength=0.6,
                 beliefs=[value],
             ))
         self.psychology.commitments = self.identity_commitments.copy()
@@ -449,7 +455,6 @@ class RavanaAgent:
             global_U=U,
         )
         emotion_state = self.emotion.current_state()
-        current_arousal = emotion_state["arousal"]
 
         # ── Step 4: Psychology (Dissonance + Social Norms) ───────────────
         psy_state = {
@@ -460,12 +465,16 @@ class RavanaAgent:
             "safety_signal": context.get("safety_signal", 0.5),
             "ethics_signal": context.get("ethics_signal", 0.5),
         }
-        psy_result = self.psychology.process(
-            psy_state, 
-            global_U=U,
-            arousal=current_arousal,  # Pass the new parameter
-        )
-        dissonance_score = self.psychology.dissonance_score
+        psy_result = self.psychology.process(psy_state, global_U=U)
+        
+        # v3.5: Stress-amplified dissonance — arousal increases perceived "pain" of misalignment
+        stress_arousal = emotion_state["arousal"]
+        base_dissonance = self.psychology.dissonance_score
+        stress_amplification = 1.0 + self.stress_amplification_factor * stress_arousal
+        dissonance_score = np.clip(base_dissonance * stress_amplification, 0.0, 1.0)
+        
+        # Store amplified dissonance back to psychology module for consistency
+        self.psychology.dissonance_score = dissonance_score
 
         # ── Step 5: Reasoning ───────────────────────────────────────────
         reasoning_context = {
@@ -483,14 +492,7 @@ class RavanaAgent:
         )
 
         # ── Step 6: Decision ────────────────────────────────────────────
-        # Extract scenario_id from context if available
-        scenario_id = context.get("task_id", "unknown_cycle")
-        decision = self._make_decision(
-            reasoning_result, 
-            dissonance_score, 
-            psy_result,
-            scenario_id=scenario_id
-        )
+        decision = self._make_decision(reasoning_result, dissonance_score, psy_result)
 
         # ── Step 7: Meaning Score ────────────────────────────────────────
         meaning_score = self._compute_meaning(
@@ -529,29 +531,20 @@ class RavanaAgent:
         reasoning_result,
         dissonance_score: float,
         psy_result: Dict[str, Any],
-        scenario_id: str = "unknown",
     ) -> str:
         """
-        Make a decision based on reasoning + constraints (Section 5.2).
+        Make a decision based on reasoning + constraints.
 
         P2: If dissonance is high, force dissonant beliefs to be updated.
         Hard constraints override all other considerations.
-        NEW: Records outcomes for symbolic constraint discovery.
         """
         # Check hard constraints
         conclusion = reasoning_result.conclusion.lower()
-        violated_principles = []
         for constraint in self.hard_constraints:
             if "harm" in constraint and "harm" in conclusion:
-                violated_principles.append("minimize harm")
-                msg = "CONSTRAINT: prevent harm — Decision blocked because it violated the fundamental safety constraint against causing harm."
-                self._record_dilemma_outcome(scenario_id, reasoning_result.conclusion, "failure", violated_principles)
-                return msg
+                return "CONSTRAINT: prevent harm — Decision blocked because it violated the fundamental safety constraint against causing harm."
             if "truth" in constraint and any(w in conclusion for w in ["lie", "deceit", "hide"]):
-                violated_principles.append("be truthful")
-                msg = "CONSTRAINT: truth-seeking — Decision blocked because it involved deceptive practices incompatible with the core truth-seeking mandate."
-                self._record_dilemma_outcome(scenario_id, reasoning_result.conclusion, "failure", violated_principles)
-                return msg
+                return "CONSTRAINT: truth-seeking — Decision blocked because it involved deceptive practices incompatible with the core truth-seeking mandate."
 
         # Dissonance-driven correction
         if dissonance_score > self.psychology.cde.threshold:
@@ -561,25 +554,10 @@ class RavanaAgent:
                 f"due to high cognitive dissonance ({dissonance_score:.2f}). "
                 f"It chose to {resolution['description'].lower()} to maintain value alignment."
             )
-            # Dissonance correction is a 'soft failure' of the initial reasoning, good for discovery
-            self._record_dilemma_outcome(scenario_id, reasoning_result.conclusion, "corrected", ["internal consistency"])
             return explanation
 
-        # Standard reasoned decision
+        # Standard reasoned decision with explanation
         return f"REASONED: {reasoning_result.explanation}"
-
-    def _record_dilemma_outcome(self, scenario_id: str, decision: str, outcome: str, violated: List[str]):
-        """Helper to record outcomes in the critical thinking module."""
-        from .critical_thinking import DilemmaOutcome
-        record = DilemmaOutcome(
-            scenario_id=scenario_id,
-            scenario_description=decision, # Simplified for discovery
-            decision=decision,
-            outcome=outcome,
-            violated_principles=violated,
-            timestamp=self.cycle_count
-        )
-        self.critical.record_dilemma(record)
 
     def _compute_coherence_delta(self, decision: str) -> float:
         """Compute change in coherence score from decision."""
@@ -696,41 +674,9 @@ class RavanaAgent:
         
         # Step 3: Trigger dissonance-driven correction
         resolution = self.psychology.cde.trigger_resolution(challenge_dissonance, Action(""))
-        updated_decision = (
-            f"CHALLENGE RESOLVED: {resolution['strategy']} — {resolution['description']}. "
-            f"New logic based on re-evaluation: {reasoning_result.explanation}"
-        )
+        self.psychology.dissonance_score -= resolution.get("dissonance_cost", 0.0)
         
         # Step 4: Record the dilemma outcome for constraint discovery
-        self._record_dilemma_outcome(
-            scenario_id=f"challenge_{self.explanation_challenges_received}", 
-            decision=updated_decision, 
-            outcome="corrected", 
-            violated=["original_explanation"]
-        )
-        
-        # Step 5: Update learning gain (learning from being called out)
-        final_dissonance = self.psychology.dissonance_score
-        learning_gain = abs(final_dissonance - initial_dissonance) + 0.2  # Bonus for challenge response
-        
-        challenge_record = ChallengeRecord(
-            challenge_id=f"challenge_{self.explanation_challenges_received}",
-            original_explanation=original_explanation,
-            challenge_reason=challenge_reason,
-            initial_dissonance=initial_dissonance,
-            final_dissonance=final_dissonance,
-            resolution_strategy=resolution['strategy'],
-            updated_decision=updated_decision,
-            timestamp=self.cycle_count,
-            learning_gain=learning_gain,
-        )
-        self.challenge_history.append(challenge_record)
-        
-        # Track successful challenge responses
-        if reasoning_result.confidence > 0.6:
-            self.explanation_challenges_successful += 1
-        
-        return updated_decision, learning_gain, challenge_record
         self.critical.record_dilemma_outcome(
             scenario_id=f"challenge_{self.cycle_count}",
             scenario_description=challenge_reason,
@@ -770,6 +716,10 @@ class RavanaAgent:
             self.explanation_challenges_successful += 1
         
         return updated_decision, learning_gain, challenge_record
+    
+    def get_current_weights(self) -> Dict[str, float]:
+        """Get current adaptive weights."""
+        return self.pressure_scheduler.get_weights(self.current_episode)
     
     def get_transfer_efficiency(self) -> float:
         """
